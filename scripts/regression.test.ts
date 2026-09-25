@@ -11,6 +11,7 @@ import { parseHistory } from "../lib/chat";
 import { partialAnswer, readChatResponse } from "../lib/chat-stream";
 import { retrievalQueries, selectContext } from "../lib/retrieval";
 import { smallTalkAnswer } from "../lib/small-talk";
+import { generateAnswer } from "../lib/gemini";
 
 test("chat validation, grounding, retries, safe errors and quota guard", async () => {
   const originalFetch = global.fetch;
@@ -272,4 +273,45 @@ test("stream decoding handles split records, rejects incomplete output and hides
   assert.deepEqual(await readChatResponse(new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } }), text => drafts.push(text)), expected);
   assert.deepEqual(drafts, ["Caf\u00e9"]);
   await assert.rejects(readChatResponse(new Response('{"type":"draft","text":"Incomplete"}\n', { headers: { "Content-Type": "application/x-ndjson" } }), () => {}));
+});
+
+test("provider streaming exposes partial supported answers before completion and hides refusal text", async () => {
+  const originalFetch = global.fetch;
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test-only-key";
+  try {
+    for (const refused of [false, true]) {
+      let completed = false;
+      const drafts: string[] = [];
+      global.fetch = async (url, init) => {
+        assert.ok(String(url).includes("streamGenerateContent"));
+        const schema = JSON.parse(String(init?.body)).generationConfig.responseSchema;
+        assert.deepEqual(schema.propertyOrdering, ["refused", "answer", "chunkIds"]);
+        assert.deepEqual(schema.required, schema.propertyOrdering);
+        const encoder = new TextEncoder();
+        const event = (text: string) => encoder.encode(`data: ${JSON.stringify({
+          candidates: [{ index: 0, content: { role: "model", parts: [{ text }] } }],
+        })}\n\n`);
+        return new Response(new ReadableStream({
+          async start(controller) {
+            controller.enqueue(event(`{"refused":${refused},"answer":"He built`));
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            controller.enqueue(event(` a project.","chunkIds":${refused ? "[]" : "[1]"}}`));
+            completed = true;
+            controller.close();
+          },
+        }), { headers: { "Content-Type": "text/event-stream" } });
+      };
+      const answer = await generateAnswer("Use the context", "A question", (text) => {
+        drafts.push(text);
+        if (text === "He built") assert.equal(completed, false, "Draft must arrive before the provider finishes");
+      });
+      assert.equal(answer.refused, refused);
+      assert.deepEqual(drafts, refused ? [""] : ["", "He built", "He built a project."]);
+    }
+  } finally {
+    global.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
 });
