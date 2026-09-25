@@ -89,7 +89,7 @@ export default function Portfolio() {
                   Explore my work ↓
                 </a>
                 <a className="button secondary" href="/api/cv" download>
-                  Download CV <span className="file-format">TXT</span>
+                  Download CV <span className="file-format">PDF</span>
                 </a>
               </div>
               <div className="hero-note">
