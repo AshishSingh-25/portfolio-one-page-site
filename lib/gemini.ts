@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import { GoogleGenerativeAI, SchemaType, type ObjectSchema } from "@google/generative-ai";
 import { partialAnswer } from "./chat-stream";
 
 export const EMBEDDING_MODEL = "gemini-embedding-001";
@@ -68,6 +68,23 @@ export type GroundedAnswer = {
   chunkIds: number[];
 };
 
+// The installed SDK predates the API's propertyOrdering field. Keep the typed
+// schema and declare that supported field explicitly: drafts need the refusal
+// decision before answer text, otherwise they remain hidden until the end.
+const ANSWER_SCHEMA: ObjectSchema & { propertyOrdering: string[] } = {
+  type: SchemaType.OBJECT,
+  properties: {
+    refused: { type: SchemaType.BOOLEAN },
+    answer: { type: SchemaType.STRING },
+    chunkIds: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.INTEGER },
+    },
+  },
+  required: ["refused", "answer", "chunkIds"],
+  propertyOrdering: ["refused", "answer", "chunkIds"],
+};
+
 export async function generateAnswer(
   systemPrompt: string,
   userPrompt: string,
@@ -79,18 +96,7 @@ export async function generateAnswer(
       systemInstruction: systemPrompt,
       generationConfig: {
         responseMimeType: "application/json",
-        responseSchema: {
-          type: SchemaType.OBJECT,
-          properties: {
-            refused: { type: SchemaType.BOOLEAN },
-            answer: { type: SchemaType.STRING },
-            chunkIds: {
-              type: SchemaType.ARRAY,
-              items: { type: SchemaType.INTEGER },
-            },
-          },
-          required: ["answer", "refused", "chunkIds"],
-        },
+        responseSchema: ANSWER_SCHEMA,
       },
     },
     { timeout: 20000 },
@@ -101,10 +107,14 @@ export async function generateAnswer(
     onDraft("");
     const result = await model.generateContentStream(userPrompt);
     let accumulated = "";
+    let previousDraft = "";
     for await (const chunk of result.stream) {
       accumulated += chunk.text();
       const text = partialAnswer(accumulated);
-      if (text !== undefined) onDraft(text);
+      if (text !== undefined && text !== previousDraft) {
+        onDraft(text);
+        previousDraft = text;
+      }
     }
     return (await result.response).text();
   });
